@@ -369,10 +369,21 @@ def run_hermes_cognition(message: str, conversation_id: str | None, key: str,
             else None
         )
         session_token = _BROWSER_SESSION.set(browser_session)
+        # This Core calls AIAgent directly rather than through Hermes CLI startup.
+        # Let Hermes discover configured remote MCP servers before taking the
+        # agent's tool snapshot; Hermes still owns the MCP client and tool loop.
+        from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
+
+        ensure_mcp_discovery_before_agent_build(
+            logger=logger,
+            single_query=True,
+            thread_name="xiaxia-hermes-mcp-discovery",
+        )
         agent = AIAgent(
             provider="custom", api_key=key, base_url=base_url, model=model,
             enabled_toolsets=[
                 "xiaxia_experiment_readonly", "session_search",
+                "mcp-reading_house",
                 *(["xiaxia_life"] if enable_life_tools else []),
                 *(["xiaxia_executable_browser"] if browser_session is not None else []),
             ],
