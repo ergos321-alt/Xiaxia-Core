@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
+from itsdangerous import URLSafeTimedSerializer
 
 from app.api.schemas import (
     BrowserStatus,
@@ -53,6 +55,10 @@ from app.services import RuntimeServices
 
 router = APIRouter()
 logger = logging.getLogger("xiaxia.api")
+READING_ASSERTION_AUDIENCE = "xiaxia-reading-house"
+READING_ASSERTION_ROLE = "human"
+READING_ASSERTION_TTL_SECONDS = 60
+READING_ASSERTION_SALT = "xiaxia-reading-human-v1"
 
 
 def _services(request: Request) -> RuntimeServices:
@@ -201,6 +207,50 @@ async def health(request: Request) -> HealthResponse:
         service=services.settings.service_name,
         version=services.settings.version,
     )
+
+
+@router.post("/v1/reading/session")
+async def create_reading_session_assertion(
+    request: Request,
+    response: Response,
+    authorization: str | None = Header(default=None),
+) -> dict[str, int | str]:
+    """Issue a short-lived human assertion for the independent Reading service."""
+    services = _services(request)
+    if not services.settings.core_api_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Reading session bridge is not configured",
+        )
+    _authorize(services, authorization)
+
+    secret = services.settings.reading_assertion_secret
+    if not secret or len(secret.encode("utf-8")) < 32:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Reading session bridge is not configured",
+        )
+
+    now = int(datetime.now(UTC).timestamp())
+    expires_at = now + READING_ASSERTION_TTL_SECONDS
+    serializer = URLSafeTimedSerializer(
+        secret,
+        salt=READING_ASSERTION_SALT,
+        signer_kwargs={"digest_method": hashlib.sha256},
+    )
+    assertion = serializer.dumps(
+        {
+            "aud": READING_ASSERTION_AUDIENCE,
+            "role": READING_ASSERTION_ROLE,
+            "sub": "human-owner",
+            "iat": now,
+            "exp": expires_at,
+            "jti": str(uuid.uuid4()),
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return {"assertion": assertion, "expires_in": READING_ASSERTION_TTL_SECONDS}
 
 
 @router.get("/v1/status", response_model=StatusResponse)

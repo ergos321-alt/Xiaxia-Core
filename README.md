@@ -36,3 +36,7 @@ Relevant environment configuration is server-side. The image exposes names inclu
 - `app/core/runtime.py`, `app/core/digital_identity_gateway.py`, `app/execution/`, and `app/tools/`: existing runtime and compatibility code preserved as captured.
 
 This is a source snapshot, not an architectural reassignment: the repository records what the image contains and does not change ownership of semantic decisions, tools, or independent capabilities.
+
+## Reading human-session bridge
+
+`POST /v1/reading/session` requires the existing `CORE_API_TOKEN` Bearer identity and only signs a 60-second Reading-audience human assertion. Configure a separate random `READING_ASSERTION_SECRET` (at least 32 bytes) in Core and Reading House server environments; never reuse `ACTION_API_TOKEN` or place this secret in Xiaxia App. The assertion has a unique `jti`; one-time consumption is not persisted in this phase, so replay is bounded by its 60-second lifetime. Core does not proxy Reading API calls or store Reading data.

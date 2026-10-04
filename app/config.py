@@ -48,6 +48,7 @@ class Settings:
     memory_recent_limit: int = 5
     max_history_messages: int = 20
     core_api_token: str | None = None
+    reading_assertion_secret: str | None = None
 
     browser_tools_enabled: bool = False
     browser_native_tool_calling_enabled: bool = False
@@ -118,6 +119,7 @@ class Settings:
             memory_recent_limit=_int_env("MEMORY_RECENT_LIMIT", 5),
             max_history_messages=_int_env("MAX_HISTORY_MESSAGES", 20),
             core_api_token=os.getenv("CORE_API_TOKEN") or None,
+            reading_assertion_secret=os.getenv("READING_ASSERTION_SECRET") or None,
             browser_tools_enabled=_bool_env("BROWSER_TOOLS_ENABLED", False),
             browser_native_tool_calling_enabled=_bool_env(
                 "BROWSER_NATIVE_TOOL_CALLING_ENABLED", False
