@@ -141,6 +141,46 @@ class HermesChatResult:
     task_status: str = TaskStatus.NOT_EXECUTED.value
 
 
+@dataclass(frozen=True)
+class HermesModelSelection:
+    provider: str
+    model: str
+    api_key: str | None = None
+    base_url: str | None = None
+    reasoning_effort: str | None = None
+
+
+def _hermes_model_selection(settings) -> HermesModelSelection:
+    """Select the provider at the existing Hermes boundary; Qwen remains rollback-ready."""
+    provider = os.getenv("HERMES_PROVIDER", "custom").strip().lower()
+    if provider == "custom":
+        if not settings.qwen_api_key:
+            raise ModelProviderError("Qwen provider is not configured")
+        return HermesModelSelection(
+            provider="custom",
+            model=settings.qwen_model,
+            api_key=settings.qwen_api_key,
+            base_url=settings.qwen_base_url,
+        )
+    if provider == "openai-codex":
+        model = os.getenv("HERMES_MODEL", "gpt-5.6-sol").strip()
+        reasoning_effort = os.getenv("HERMES_REASONING_EFFORT", "low").strip().lower()
+        if model != "gpt-5.6-sol":
+            raise ModelProviderError(
+                "openai-codex production model must be gpt-5.6-sol"
+            )
+        if reasoning_effort != "low":
+            raise ModelProviderError(
+                "openai-codex production reasoning effort must be low"
+            )
+        return HermesModelSelection(
+            provider="openai-codex",
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+    raise ModelProviderError(f"Unsupported Hermes provider: {provider}")
+
+
 def _authoritative_time_context(now: datetime | None = None) -> str:
     current = now or datetime.now(UTC)
     if current.tzinfo is None:
@@ -346,9 +386,11 @@ def _terminal_response(
     return reply.strip()
 
 
-def run_hermes_cognition(message: str, conversation_id: str | None, key: str,
-                          base_url: str, model: str, system_context: str,
+def run_hermes_cognition(message: str, conversation_id: str | None, key: str | None,
+                          base_url: str | None, model: str, system_context: str,
                           prior_history: list[dict], *,
+                          provider: str = "custom",
+                          reasoning_effort: str | None = None,
                           enable_life_tools: bool = True,
                           browser_tool: BrowserTool | None = None,
                           request_id: str | None = None,
@@ -379,8 +421,22 @@ def run_hermes_cognition(message: str, conversation_id: str | None, key: str,
             single_query=True,
             thread_name="xiaxia-hermes-mcp-discovery",
         )
+        provider_config = {"provider": provider, "model": model}
+        if provider == "custom":
+            provider_config.update(api_key=key, base_url=base_url)
+        elif provider == "openai-codex":
+            if reasoning_effort != "low":
+                raise ModelProviderError(
+                    "openai-codex production reasoning effort must be low"
+                )
+            provider_config["reasoning_config"] = {
+                "enabled": True,
+                "effort": reasoning_effort,
+            }
+        else:
+            raise ModelProviderError(f"Unsupported Hermes provider: {provider}")
         agent = AIAgent(
-            provider="custom", api_key=key, base_url=base_url, model=model,
+            **provider_config,
             enabled_toolsets=[
                 "xiaxia_experiment_readonly", "session_search",
                 "mcp-reading_house",
@@ -424,8 +480,7 @@ async def chat(*, message: str, conversation_id: str | None,
                request_id: str | None, settings, memory, store,
                browser_tool: BrowserTool | None = None,
                execution_ledger: ExecutionLedger | None = None) -> HermesChatResult:
-    if not settings.qwen_api_key:
-        raise ModelProviderError("Qwen provider is not configured")
+    model_selection = _hermes_model_selection(settings)
     req_id = request_id or str(uuid.uuid4())
     ledger_started = False
     task_status = TaskStatus.NOT_EXECUTED
@@ -473,9 +528,12 @@ async def chat(*, message: str, conversation_id: str | None,
         ]
     try:
         reply, session_id, usage = await asyncio.to_thread(
-            run_hermes_cognition, message, conversation_id, settings.qwen_api_key,
-            settings.qwen_base_url, settings.qwen_model, memory_context,
-            prior_core_history, browser_tool=browser_tool, request_id=req_id,
+            run_hermes_cognition, message, conversation_id,
+            model_selection.api_key, model_selection.base_url, model_selection.model,
+            memory_context, prior_core_history,
+            provider=model_selection.provider,
+            reasoning_effort=model_selection.reasoning_effort,
+            browser_tool=browser_tool, request_id=req_id,
         )
     except Exception as exc:
         logger.exception("hermes_chat_failed", extra={"fields": {"request_id": request_id}})
@@ -515,6 +573,8 @@ async def chat(*, message: str, conversation_id: str | None,
         )
     logger.info("hermes_chat_completed", extra={"fields": {
         "request_id": req_id, "session_id": session_id,
+        "provider": model_selection.provider, "model": model_selection.model,
+        "reasoning_effort": model_selection.reasoning_effort,
         "memory_count": len(retrieved), "memory_degraded": degraded,
         "api_calls": usage.get("api_calls", 0),
         "input_tokens": usage.get("input_tokens", 0),
@@ -524,7 +584,7 @@ async def chat(*, message: str, conversation_id: str | None,
     }})
     return HermesChatResult(
         reply=reply, conversation_id=session_id, request_id=req_id,
-        model=settings.qwen_model, retrieved_memory_count=len(retrieved),
+        model=model_selection.model, retrieved_memory_count=len(retrieved),
         memory_degraded=degraded, api_calls=usage.get("api_calls", 0),
         input_tokens=usage.get("input_tokens", 0),
         output_tokens=usage.get("output_tokens", 0),
@@ -624,19 +684,20 @@ async def run_life_cognition(
     settings,
 ) -> LifeCognitionOutcome:
     """Run one isolated Life cognition through the same Hermes boundary as chat."""
-    if not settings.qwen_api_key:
-        raise ModelProviderError("Qwen provider is not configured")
+    model_selection = _hermes_model_selection(settings)
     scheduled = bool(request.activities)
     system_context = _life_system_context(request)
     reply, session_id, usage = await asyncio.to_thread(
         run_hermes_cognition,
         _life_prompt(request),
         request.session_id,
-        settings.qwen_api_key,
-        settings.qwen_base_url,
-        settings.qwen_model,
+        model_selection.api_key,
+        model_selection.base_url,
+        model_selection.model,
         system_context,
         [],
+        provider=model_selection.provider,
+        reasoning_effort=model_selection.reasoning_effort,
         enable_life_tools=False,
         allow_intentional_silence=scheduled,
         failure_trace_context={
